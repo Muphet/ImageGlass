@@ -38,8 +38,16 @@ using System.Threading.Tasks;
 using ImageGlass.Library.WinAPI;
 using System.Collections.Concurrent;
 
+using System.Reactive.Disposables;
+using BraveLantern.Swatcher;
+using BraveLantern.Swatcher.Config;
+using BraveLantern.Swatcher.Args;
+using ImageGlass.Library.SwatcherExtensions;
+
+
 namespace ImageGlass
 {
+    
     public partial class frmMain : Form
     {
         public frmMain()
@@ -88,12 +96,27 @@ namespace ImageGlass
 
 
         /***********************************
-         * Variables for FileSystemWatcher
+         * Variables for Swatcher
          ***********************************/
-        WatcherChangeTypes _lastAction = WatcherChangeTypes.All; //Last action fired.
-        DateTime _lastActionTime = DateTime.Now; //When the last action was fired.
         List<string> queueListForDeleting = new List<string>(); // the list of local deleted files, need to be deleted in the memory list
+        private Swatcher _watcher { get; set; }
+        private CompositeDisposable _watcherDisposables { get; set; }
+
+
         #endregion
+
+
+
+        
+
+
+
+
+
+
+
+
+
 
 
 
@@ -198,13 +221,11 @@ namespace ImageGlass
                 filePath = path;
 
                 // get directory
-                //dirPath = (Path.GetDirectoryName(path) + "\\").Replace("\\\\", "\\");
-                //dirPath = path.Substring(0, path.LastIndexOf("\\") + 1);
                 dirPath = Path.GetDirectoryName(path);
             }
             else if (Directory.Exists(path))
             {
-                dirPath = path; // (path + "\\").Replace("\\\\", "\\");
+                dirPath = path;
             }
 
             //Get supported image extensions from directory
@@ -249,10 +270,8 @@ namespace ImageGlass
             NextPic(0);
 
             //Watch all changes of current path
-            sysWatch.Path = dirPath;
-            sysWatch.IncludeSubdirectories = GlobalSetting.IsRecursiveLoading;
-            sysWatch.EnableRaisingEvents = true;
-            
+            InitializeSWatcher(dirPath, GlobalSetting.IsRecursiveLoading);
+            this._watcher.Start().GetAwaiter().GetResult(); //Start watcher
         }
 
         private void ImageList_OnFinishLoadingImage(object sender, EventArgs e)
@@ -590,7 +609,7 @@ namespace ImageGlass
             GC.WaitForPendingFinalizers();
         }
 
-
+        
         /// <summary>
         /// Update image information on status bar
         /// </summary>
@@ -1936,7 +1955,6 @@ namespace ImageGlass
             }
             base.WndProc(ref m);
         }
-        
 
         private void frmMain_Load(object sender, EventArgs e)
         {
@@ -1994,6 +2012,13 @@ namespace ImageGlass
         {
             try
             {
+                if (this._watcher.IsRunning)
+                {
+                    this._watcher.Stop().GetAwaiter().GetResult();
+                }
+
+                DisposeSWatcher();
+
                 //clear temp files
                 if (Directory.Exists(GlobalSetting.TempDir))
                 {
@@ -2272,298 +2297,7 @@ namespace ImageGlass
             }
         }
 
-
-        #region File System Watcher events
-        private void sysWatch_Renamed(object sender, RenamedEventArgs e)
-        {
-            string newFilename = e.FullPath;
-            string oldFilename = e.OldFullPath;
-
-            
-            var oldExt = Path.GetExtension(oldFilename).ToLower();
-            var newExt = Path.GetExtension(newFilename).ToLower();
-
-            // Only watch the supported file types
-            if (!GlobalSetting.AllImageFormats.Contains(oldExt) && !GlobalSetting.AllImageFormats.Contains(newExt))
-            {
-                return;
-            }
-
-
-            //Get index of renamed image
-            int imgIndex = GlobalSetting.ImageList.IndexOf(oldFilename);
-
-
-            //if user changed file extension
-            if (oldExt.CompareTo(newExt) != 0)
-            {
-                // [old] && [new]: update filename only
-                if (GlobalSetting.AllImageFormats.Contains(oldExt) && GlobalSetting.AllImageFormats.Contains(newExt))
-                {
-                    if (imgIndex > -1)
-                    {
-                        RenameAction();
-                    }
-                }
-                else
-                {
-                    // [old] && ![new]: remove from image list
-                    if (GlobalSetting.AllImageFormats.Contains(oldExt))
-                    {
-                        DoDeleteFiles(oldFilename);
-                    }
-                    // ![old] && [new]: add to image list
-                    else if (GlobalSetting.AllImageFormats.Contains(newExt))
-                    {
-                        AddNewFileAction();
-                    }
-                }
-            }
-            //if user changed filename only (not extension)
-            else
-            {
-                if (imgIndex > -1)
-                {
-                    RenameAction();
-                }
-            }
-            
-
-            
-            void RenameAction()
-            {
-                //Rename file in image list
-                GlobalSetting.ImageList.SetFileName(imgIndex, newFilename);
-
-                //Update status bar title
-                UpdateStatusBar();
-
-                try
-                {
-                    //Rename image in thumbnail bar
-                    thumbnailBar.Items[imgIndex].Text = e.Name;
-                    thumbnailBar.Items[imgIndex].Tag = newFilename;
-                }
-                catch { }
-            }
-
-
-            void AddNewFileAction()
-            {
-                //Add the new image to the list
-                GlobalSetting.ImageList.AddItem(newFilename);
-
-                //Add the new image to thumbnail bar
-                ImageListView.ImageListViewItem lvi = new ImageListView.ImageListViewItem(newFilename);
-                lvi.Tag = newFilename;
-                thumbnailBar.Items.Add(lvi);
-            }
-
-        }
-
         
-
-        private void sysWatch_Changed(object sender, FileSystemEventArgs e)
-        {
-            // Only watch the supported file types
-            var ext = Path.GetExtension(e.Name).ToLower();
-            if (!GlobalSetting.AllImageFormats.Contains(ext))
-            {
-                return;
-            }
-
-            var timeDiff = (DateTime.Now - _lastActionTime).TotalSeconds;
-
-            //Console.WriteLine(DateTime.Now.ToString("hh:mm:ss.fff") + ": " + e.ChangeType.ToString());
-            //Console.WriteLine(timeDiff.ToString());
-
-
-            void onFileUpdated()
-            {
-                // update the viewing image
-                var imgIndex = GlobalSetting.ImageList.IndexOf(e.FullPath);
-                if (imgIndex == GlobalSetting.CurrentIndex)
-                {
-                    NextPic(0, true, true);
-                }
-
-                //update thumbnail
-                thumbnailBar.Items[imgIndex].Update();
-            }
-
-
-            //Formular
-            //update: delete - create   |  all
-            //update: change - change   |  all
-            //create: create            |  all
-            //delete: delete            |  all
-
-            if (e.ChangeType == WatcherChangeTypes.Created)
-            {
-                // File change type = Updated
-                if (_lastAction == WatcherChangeTypes.Deleted && timeDiff < 5)
-                {
-                    onFileUpdated();
-                }
-                // File change type = Created
-                else
-                {
-                    if (GlobalSetting.ImageList.IndexOf(e.FullPath) == -1)
-                    {
-                        //Add the new image to the list
-                        GlobalSetting.ImageList.AddItem(e.FullPath);
-
-                        //Add the new image to thumbnail bar
-                        ImageListView.ImageListViewItem lvi = new ImageListView.ImageListViewItem(e.FullPath);
-                        lvi.Tag = e.FullPath;
-                        thumbnailBar.Items.Add(lvi);
-                    }
-                }
-                
-            }
-            else if (e.ChangeType == WatcherChangeTypes.Changed)
-            {
-                if (_lastAction == WatcherChangeTypes.Changed && timeDiff < 300)
-                {
-                    onFileUpdated();
-                }
-            }
-            // Still not sure if File change type = Deleted,
-            // need to wait few ms to check the next action
-            else if (e.ChangeType == WatcherChangeTypes.Deleted)
-            {
-                Timer tim_waitingForNextActionAfterDelete = new Timer
-                {
-                    Interval = 50
-                };
-
-                tim_waitingForNextActionAfterDelete.Tick += Tim_waitingForNextActionAfterDelete_Tick;
-                tim_waitingForNextActionAfterDelete.Tag = e.FullPath;
-                tim_waitingForNextActionAfterDelete.Enabled = true;
-
-                _lastAction = e.ChangeType;
-                
-            }
-
-
-            _lastAction = e.ChangeType;
-            _lastActionTime = DateTime.Now;
-        }
-
-        /// <summary>
-        /// Wait for a short time to confirm the file was deleted or modified.
-        /// If it was actually deleted, add it to the queue
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void Tim_waitingForNextActionAfterDelete_Tick(object sender, EventArgs e)
-        {
-            var timer = (Timer)sender;
-            timer.Enabled = false;
-
-            if (_lastAction == WatcherChangeTypes.Deleted || _lastAction == WatcherChangeTypes.All)
-            {
-                // add to queue list for deleting
-                queueListForDeleting.Add(timer.Tag.ToString());
-                //Console.WriteLine("Will del file: " + timer.Tag.ToString());
-            }
-
-            //reset
-            _lastAction = WatcherChangeTypes.All;
-        }
-
-        /// <summary>
-        /// The queue thread to check the files needed to be deleted.
-        /// </summary>
-        private void ThreadWatcherDeleteFiles()
-        {
-            while (true)
-            {
-                if (queueListForDeleting.Count > 0)
-                {
-                    var filename = queueListForDeleting[0];
-                    queueListForDeleting.RemoveAt(0);
-
-                    DoDeleteFiles(filename);
-                    Application.DoEvents();
-                    GC.Collect();
-                }
-                else
-                {
-                    System.Threading.Thread.Sleep(10);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Proceed deleting file in memory
-        /// </summary>
-        /// <param name="filename"></param>
-        private void DoDeleteFiles(string filename)
-        {
-            //Get index of deleted image
-            int imgIndex = GlobalSetting.ImageList.IndexOf(filename);
-
-            if (imgIndex > -1)
-            {
-                //delete image list
-                GlobalSetting.ImageList.Remove(imgIndex);
-
-                try
-                {
-                    //delete thumbnail list
-                    thumbnailBar.Items.RemoveAt(imgIndex);
-                }
-#pragma warning disable CS0168 // Variable is declared but never used
-                catch (Exception ex) { }
-#pragma warning restore CS0168 // Variable is declared but never used
-
-                // change the viewing image to memory data mode
-                if (imgIndex == GlobalSetting.CurrentIndex)
-                {
-                    GlobalSetting.IsImageError = true;
-                    LocalSetting.IsTempMemoryData = true;
-
-                    UpdatePicMain(GlobalSetting.LangPack.Items["frmMain._ImageNotExist"]);
-                }
-
-            }
-        }
-
-        /// <summary>
-        /// Update UI of the picMain control
-        /// </summary>
-        /// <param name="text"></param>
-        private delegate void UpdatePicMainCallback(string text);
-
-        /// <summary>
-        /// Update UI of the picMain control
-        /// </summary>
-        /// <param name="text"></param>
-        private void UpdatePicMain(string text)
-        {
-            // InvokeRequired required compares the thread ID of the
-            // calling thread to the thread ID of the creating thread.
-            // If these threads are different, it returns true.
-            if (picMain.InvokeRequired)
-            {
-                UpdatePicMainCallback d = new UpdatePicMainCallback(UpdatePicMain);
-                Invoke(d, new object[] { text });
-            }
-            else
-            {
-                picMain.ForeColor = Theme.Theme.InvertColor(GlobalSetting.BackgroundColor);
-                picMain.Text = text;
-
-                if (queueListForDeleting.Count == 0)
-                {
-                    NextPic(0);
-                }
-            }
-        }
-        #endregion
-
-
         // Use mouse wheel to navigate, scroll, or zoom images
         private void picMain_MouseWheel(object sender, MouseEventArgs e)
         {
@@ -2673,6 +2407,340 @@ namespace ImageGlass
                 btnMenu.Alignment = ToolStripItemAlignment.Right;
             }
         }
+
+
+
+
+        
+
+
+
+
+
+
+        #region File System Watcher
+        /// <summary>
+        /// Create new Configuration for Swatcher with default Settings
+        /// </summary>
+        /// <param name="folderPath">The folderPath parameter is the path to a folder that you want Swatcher to watch. UNC paths are not supported! If you want to monitor a network folder, you need to map it as a drive.</param>
+        /// <param name="isRecursive">Set it to true if you want to watcher child files/folders</param>
+        private void InitializeSWatcher(string folderPath, bool isRecursive = false)
+        {
+            this._watcherDisposables = new CompositeDisposable();
+
+            var changeTypes = WatcherChangeTypes.All;
+            var itemTypes = SwatcherItemTypes.File;
+            var notificationFilters = SwatcherNotificationTypes.CreationTime | SwatcherNotificationTypes.FileName | SwatcherNotificationTypes.LastWrite | SwatcherNotificationTypes.Size;
+
+            var configs = new SwatcherConfig(folderPath, changeTypes, itemTypes, notificationFilters, loggingEnabled: false, isRecursive: isRecursive);
+
+            this._watcher = new Swatcher(configs);
+
+
+            
+            // File was renamed
+            this._watcher.Renamed.Subscribe(e =>
+            {
+                Swatcher_OnRenamed(e);
+            }).DisposeWith(this._watcherDisposables);
+
+            
+            // File was created
+            this._watcher.Created.Subscribe(e =>
+            {
+                Console.WriteLine(e.Name + ": created |  " + e.TimeOccurred + "  |   " + e.TimeCompleted);
+                Swatcher_OnCreated(e);
+            }).DisposeWith(this._watcherDisposables);
+
+
+            // File was deleted
+            this._watcher.Deleted.Subscribe(e =>
+            {
+                Console.WriteLine(e.Name + ": delete |  " + e.TimeOccurred);
+
+                Swatcher_OnDeleted(e);
+            }).DisposeWith(this._watcherDisposables);
+
+
+            // File was changed
+            this._watcher.Changed.Subscribe(e =>
+            {
+                Swatcher_OnChanged(e);
+            }).DisposeWith(this._watcherDisposables);
+
+
+        }
+
+
+        /// <summary>
+        /// Dispose Swatcher
+        /// </summary>
+        private void DisposeSWatcher()
+        {
+            this._watcherDisposables.Dispose();
+            this._watcher.Dispose();
+        }
+
+
+        
+        private void Swatcher_OnRenamed(SwatcherRenamedEventArgs e)
+        {
+            string newFilename = Path.Combine(e.FullPath, e.Name);
+            string oldFilename = Path.Combine(e.FullPath, e.OldName);
+
+
+            var oldExt = Path.GetExtension(oldFilename).ToLower();
+            var newExt = Path.GetExtension(newFilename).ToLower();
+
+            // Only watch the supported file types
+            if (!GlobalSetting.AllImageFormats.Contains(oldExt) && !GlobalSetting.AllImageFormats.Contains(newExt))
+            {
+                return;
+            }
+
+
+            //Get index of renamed image
+            int imgIndex = GlobalSetting.ImageList.IndexOf(oldFilename);
+
+
+            //if user changed file extension
+            if (oldExt.CompareTo(newExt) != 0)
+            {
+                // [old] && [new]: update filename only
+                if (GlobalSetting.AllImageFormats.Contains(oldExt) && GlobalSetting.AllImageFormats.Contains(newExt))
+                {
+                    if (imgIndex > -1)
+                    {
+                        Swatcher_RenameAction(imgIndex, newFilename);
+                    }
+                }
+                else
+                {
+                    // [old] && ![new]: remove from image list
+                    if (GlobalSetting.AllImageFormats.Contains(oldExt))
+                    {
+                        DoDeleteFiles(oldFilename);
+                    }
+                    // ![old] && [new]: add to image list
+                    else if (GlobalSetting.AllImageFormats.Contains(newExt))
+                    {
+                        Swatcher_AddNewFileAction(newFilename);
+                    }
+                }
+            }
+
+            //if user changed filename only (not extension)
+            else
+            {
+                if (imgIndex > -1)
+                {
+                    Swatcher_RenameAction(imgIndex, newFilename);
+                }
+            }
+            
+        }
+
+
+        private void Swatcher_RenameAction(int imgIndex, string newFilename)
+        {
+            // InvokeRequired required compares the thread ID of the
+            // calling thread to the thread ID of the creating thread.
+            // If these threads are different, it returns true.
+            if (this.InvokeRequired)
+            {
+                this.Invoke(new Action<int, string>(Swatcher_RenameAction), imgIndex, newFilename);
+            }
+            else
+            {
+                //Rename file in image list
+                GlobalSetting.ImageList.SetFileName(imgIndex, newFilename);
+
+                //Update status bar title
+                UpdateStatusBar();
+
+                try
+                {
+                    //Rename image in thumbnail bar
+                    thumbnailBar.Items[imgIndex].Text = Path.GetFileName(newFilename);
+                    thumbnailBar.Items[imgIndex].Tag = newFilename;
+                }
+                catch { }
+            }
+        }
+
+
+        private void Swatcher_AddNewFileAction(string newFilename)
+        {
+            // InvokeRequired required compares the thread ID of the
+            // calling thread to the thread ID of the creating thread.
+            // If these threads are different, it returns true.
+            if (thumbnailBar.InvokeRequired)
+            {
+                thumbnailBar.Invoke(new Action<string>(Swatcher_AddNewFileAction), newFilename);
+            }
+            else
+            {
+                //Add the new image to the list
+                GlobalSetting.ImageList.AddItem(newFilename);
+
+                //Add the new image to thumbnail bar
+                ImageListView.ImageListViewItem lvi = new ImageListView.ImageListViewItem(newFilename)
+                {
+                    Tag = newFilename
+                };
+
+                thumbnailBar.Items.Add(lvi);
+            }
+        }
+
+
+        private void Swatcher_OnCreated(SwatcherCreatedEventArgs e)
+        {
+            // Only watch the supported file types
+            var ext = Path.GetExtension(e.Name).ToLower();
+            if (!GlobalSetting.AllImageFormats.Contains(ext))
+            {
+                return;
+            }
+
+            if (GlobalSetting.ImageList.IndexOf(e.FullPath) == -1)
+            {
+                Swatcher_AddNewFileAction(e.FullPath);
+
+                ////Add the new image to the list
+                //GlobalSetting.ImageList.AddItem(e.FullPath);
+
+                ////Add the new image to thumbnail bar
+                //ImageListView.ImageListViewItem lvi = new ImageListView.ImageListViewItem(e.FullPath);
+                //lvi.Tag = e.FullPath;
+                //thumbnailBar.Items.Add(lvi);
+            }
+        }
+
+
+        private void Swatcher_OnChanged(SwatcherEventArgs e)
+        {
+            // Only watch the supported file types
+            var ext = Path.GetExtension(e.Name).ToLower();
+            if (!GlobalSetting.AllImageFormats.Contains(ext))
+            {
+                return;
+            }
+
+            // update the viewing image
+            var imgIndex = GlobalSetting.ImageList.IndexOf(e.FullPath);
+            if (imgIndex == GlobalSetting.CurrentIndex)
+            {
+                NextPic(0, true, true);
+            }
+
+            //update thumbnail
+            thumbnailBar.Items[imgIndex].Update();
+        }
+
+
+        private void Swatcher_OnDeleted(SwatcherEventArgs e)
+        {
+            // Only watch the supported file types
+            var ext = Path.GetExtension(e.Name).ToLower();
+            if (!GlobalSetting.AllImageFormats.Contains(ext))
+            {
+                return;
+            }
+
+            // add to queue list for deleting
+            queueListForDeleting.Add(e.FullPath);
+        }
+
+
+
+
+
+        /// <summary>
+        /// The queue thread to check the files needed to be deleted.
+        /// </summary>
+        private void ThreadWatcherDeleteFiles()
+        {
+            while (true)
+            {
+                if (queueListForDeleting.Count > 0)
+                {
+                    var filename = queueListForDeleting[0];
+                    queueListForDeleting.RemoveAt(0);
+
+                    DoDeleteFiles(filename);
+                    Application.DoEvents();
+                    GC.Collect();
+                }
+                else
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Proceed deleting file in memory
+        /// </summary>
+        /// <param name="filename"></param>
+        private void DoDeleteFiles(string filename)
+        {
+            //Get index of deleted image
+            int imgIndex = GlobalSetting.ImageList.IndexOf(filename);
+
+            if (imgIndex > -1)
+            {
+                //delete image list
+                GlobalSetting.ImageList.Remove(imgIndex);
+
+                try
+                {
+                    //delete thumbnail list
+                    thumbnailBar.Items.RemoveAt(imgIndex);
+                }
+#pragma warning disable CS0168 // Variable is declared but never used
+                catch (Exception ex) { }
+#pragma warning restore CS0168 // Variable is declared but never used
+
+                // change the viewing image to memory data mode
+                if (imgIndex == GlobalSetting.CurrentIndex)
+                {
+                    GlobalSetting.IsImageError = true;
+                    LocalSetting.IsTempMemoryData = true;
+
+                    UpdatePicMain(GlobalSetting.LangPack.Items["frmMain._ImageNotExist"]);
+                }
+
+            }
+        }
+
+
+        /// <summary>
+        /// Update UI of the picMain control
+        /// </summary>
+        /// <param name="text"></param>
+        private void UpdatePicMain(string text)
+        {
+            // InvokeRequired required compares the thread ID of the
+            // calling thread to the thread ID of the creating thread.
+            // If these threads are different, it returns true.
+            if (picMain.InvokeRequired)
+            {
+                picMain.Invoke(new Action<string>(UpdatePicMain), text);
+            }
+            else
+            {
+                picMain.ForeColor = Theme.Theme.InvertColor(GlobalSetting.BackgroundColor);
+                picMain.Text = text;
+
+                if (queueListForDeleting.Count == 0)
+                {
+                    NextPic(0);
+                }
+            }
+        }
+
+        #endregion
 
         #endregion
 
